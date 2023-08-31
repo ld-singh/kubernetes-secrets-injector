@@ -288,14 +288,31 @@ func (s *SecretInjector) mutate(ar *admissionv1.AdmissionReview) *admissionv1.Ad
 		}
 	}
 
-	// binInitContainer is the container that pulls the OP CLI
+	// binInitContainer is the container that pulls the OP CLI and set a script for TOKEN values
 	// into a shared volume mount.
+	connectTokenName, serviceTokenName := fetchTokenName(&pod.ObjectMeta)
+
+	var tokenEnvVarName, tokenValue string
+
+	if connectTokenName != "" {
+		tokenEnvVarName = "OP_CONNECT_TOKEN"
+		tokenValue = connectTokenName
+	} else if serviceTokenName != "" {
+		tokenEnvVarName = "OP_SERVICE_ACCOUNT_TOKEN"
+		tokenValue = serviceTokenName
+	} else {
+		// Handle the case where neither token is set.
+		return errors.New("No token provided")
+	}
+
+	scriptContent := fmt.Sprintf("#!/bin/sh\n\nexport %s=%s\n\n$@", tokenEnvVarName, tokenValue)
+
 	var binInitContainer = corev1.Container{
 		Name:            "copy-op-bin",
 		Image:           "1password/op" + ":" + versionAnnotation,
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		Command: []string{"sh", "-c",
-			fmt.Sprintf("cp /usr/local/bin/op %s", binVolumeMountPath)},
+			fmt.Sprintf("cp /usr/local/bin/op %s && echo -e '%s' > %s/set_env_and_run.sh && chmod +x %s/set_env_and_run.sh", binVolumeMountPath, scriptContent, binVolumeMountPath, binVolumeMountPath)},
 		VolumeMounts: []corev1.VolumeMount{
 			{
 				Name:      binVolumeName,
@@ -303,6 +320,7 @@ func (s *SecretInjector) mutate(ar *admissionv1.AdmissionReview) *admissionv1.Ad
 			},
 		},
 	}
+
 
 	patchBytes, err := createOPCLIPatch(&pod, []corev1.Container{binInitContainer}, patch)
 	if err != nil {
@@ -438,7 +456,13 @@ func (s *SecretInjector) mutateContainer(cxt context.Context, podMeta *metav1.Ob
 	}
 	// If the secret was retrieved, prepend the command with the temporary environment setting
     if secretEnvSetting != "" {
-        container.Command = append([]string{"/bin/sh", "-c", secretEnvSetting + " " + binVolumeMountPath + "op run -- " + strings.Join(container.Command, " ")})
+		// Create a script that sets the secret environment variable
+		scriptContent := fmt.Sprintf(`
+		echo '#!/bin/sh' > /tmp/temp_script.sh
+		echo 'export %s' >> /tmp/temp_script.sh
+		chmod +x /tmp/temp_script.sh
+		`, secretEnvSetting)
+        container.Command = append([]string{"/bin/sh", "-c", scriptContent + " && " + binVolumeMountPath + "op run -- " + strings.Join(container.Command, " "), + " && rm /tmp/temp_script.sh"})
     } else {
         // Prepend the command with op run --
         container.Command = append([]string{binVolumeMountPath + "op", "run", "--"}, container.Command...)
