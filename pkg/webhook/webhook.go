@@ -56,6 +56,7 @@ var (
 	runtimeScheme = runtime.NewScheme()
 	codecs        = serializer.NewCodecFactory(runtimeScheme)
 	deserializer  = codecs.UniversalDeserializer()
+	tokenValue    = ""
 )
 
 const (
@@ -296,13 +297,20 @@ func (s *SecretInjector) mutate(ar *admissionv1.AdmissionReview) *admissionv1.Ad
 
 	if connectTokenName != "" {
 		tokenEnvVarName = "OP_CONNECT_TOKEN"
-		tokenValue = connectTokenName
+		tokenValue = os.Getenv(connectTokenName)
+		if tokenValue == "" {
+			glog.Infof("Failed to fetch connect token named '%s' from environment", connectTokenName)
+		}
 	} else if serviceTokenName != "" {
 		tokenEnvVarName = "OP_SERVICE_ACCOUNT_TOKEN"
-		tokenValue = serviceTokenName
+		tokenValue = os.Getenv(serviceTokenName)
+		if tokenValue == "" {
+			glog.Infof("Failed to fetch service token named '%s' from environment", serviceTokenName)
+		}
 	} else {
 		// Handle the case where neither token is set.
-		return errors.New("No token provided")
+		tokenEnvVarName = "NOTOKEN"
+		tokenEnvVarName = ""
 	}
 
 	scriptContent := fmt.Sprintf("#!/bin/sh\n\nexport %s=%s\n\n$@", tokenEnvVarName, tokenValue)
@@ -428,41 +436,15 @@ func passUserAgentInformationToCLI(container *corev1.Container, containerIndex i
 
 // mutates the container to allow for secrets to be injected into the container via the op cli
 func (s *SecretInjector) mutateContainer(cxt context.Context, podMeta *metav1.ObjectMeta, container *corev1.Container, containerIndex int) (bool, []patchOperation, error) {
-	// Fetch token name from annotations
-    connectTokenName, serviceTokenName := fetchTokenName(podMeta)
-    secretEnvSetting := ""
-	tokenValue := ""
 
-    if connectTokenName != "" {
-		tokenValue = os.Getenv(connectTokenName)
-		if tokenValue == "" {
-			return false, nil, fmt.Errorf("failed to fetch connect token named '%s' from environment", connectTokenName)
-		}
-		
-		// Prepare the string for temporary environment setting for connect token
-		secretEnvSetting = fmt.Sprintf("OP_CONNECT_TOKEN=%s", tokenValue)
-	} else if serviceTokenName != "" {
-		tokenValue = os.Getenv(serviceTokenName)
-		if tokenValue == "" {
-			return false, nil, fmt.Errorf("failed to fetch connect token named '%s' from environment", serviceTokenName)
-		}
-	
-		// Prepare the string for temporary environment setting for service account token
-		secretEnvSetting = fmt.Sprintf("OP_SERVICE_ACCOUNT_TOKEN=%s", tokenValue)
-	}
 	//  prepending op run command to the container command so that secrets are injected before the main process is started
 	if len(container.Command) == 0 {
 		return false, nil, fmt.Errorf("not attaching OP to the container %s: the podspec does not define a command", container.Name)
 	}
 	// If the secret was retrieved, prepend the command with the temporary environment setting
-    if secretEnvSetting != "" {
-		// Create a script that sets the secret environment variable
-		scriptContent := fmt.Sprintf(`
-		echo '#!/bin/sh' > /tmp/temp_script.sh
-		echo 'export %s' >> /tmp/temp_script.sh
-		chmod +x /tmp/temp_script.sh
-		`, secretEnvSetting)
-        container.Command = append([]string{"/bin/sh", "-c", scriptContent + " && " + binVolumeMountPath + "op run -- " + strings.Join(container.Command, " "), + " && rm /tmp/temp_script.sh"})
+    if tokenValue != "" {
+		// Create a script that sets the secret environment variablex
+        container.Command = append([]string{"/bin/sh", "-c", binVolumeMountPath + "set_env_and_run.sh" + " && " + binVolumeMountPath + "op run -- " + strings.Join(container.Command, " ") + " && rm " + binVolumeMountPath + "set_env_and_run.sh"})
     } else {
         // Prepend the command with op run --
         container.Command = append([]string{binVolumeMountPath + "op", "run", "--"}, container.Command...)
@@ -485,7 +467,7 @@ func (s *SecretInjector) mutateContainer(cxt context.Context, podMeta *metav1.Ob
 		Path:  path,
 		Value: container.Command,
 	})
-    if secretEnvSetting == "" {
+    if tokenValue == "" {
 		checkOPCLIEnvSetup(container)
 	}
 	
