@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"regexp"
 	"net/http"
 	"strings"
 
@@ -57,9 +59,11 @@ var (
 )
 
 const (
-	injectionStatus   = "operator.1password.io/status"
-	injectAnnotation  = "operator.1password.io/inject"
-	versionAnnotation = "operator.1password.io/version"
+	injectionStatus         = "operator.1password.io/status"
+	injectAnnotation        = "operator.1password.io/inject"
+	versionAnnotation        = "operator.1password.io/version"
+	connecttokenAnnotation   = "operator.1password.io/connect-token"
+	servicetokenAnnotation   = "operator.1password.io/service-token"
 )
 
 type SecretInjector struct {
@@ -98,6 +102,31 @@ func mutationRequired(metadata *metav1.ObjectMeta) bool {
 	glog.Infof("Pod %v at namespace %v. Secret injection status: %v Secret Injection Enabled:%v", metadata.Name, metadata.Namespace, status, required)
 	return required
 }
+
+// Check if the pod have annotation for token to be used to fetch secrets using op cli
+func fetchTokenName(metadata *metav1.ObjectMeta) (string, string) {
+    if metadata == nil {
+        return "", ""
+    }
+
+    annotations := metadata.GetAnnotations()
+    if annotations == nil {
+        return "", ""
+    }
+
+    // Get the value of connecttokenAnnotation
+    if connectTokenName, exists := annotations[connecttokenAnnotation]; exists {
+        return connectTokenName, ""
+    }
+
+    // Get the value of servicetokenAnnotation if connecttokenAnnotation doesn't exist
+    if serviceTokenName, exists := annotations[servicetokenAnnotation]; exists {
+        return "", serviceTokenName
+    }
+
+    return "", ""
+}
+
 
 func addContainers(target, added []corev1.Container, basePath string) (patch []patchOperation) {
 	first := len(target) == 0
@@ -216,7 +245,7 @@ func (s *SecretInjector) mutate(ar *admissionv1.AdmissionReview) *admissionv1.Ad
 		if !mutate {
 			continue
 		}
-		didMutate, initContainerPatch, err := s.mutateContainer(ctx, &c, i)
+		didMutate, initContainerPatch, err := s.mutateContainer(ctx, &pod.ObjectMeta, &c, i)
 		if err != nil {
 			return &admissionv1.AdmissionResponse{
 				Result: &metav1.Status{
@@ -237,7 +266,7 @@ func (s *SecretInjector) mutate(ar *admissionv1.AdmissionReview) *admissionv1.Ad
 			continue
 		}
 
-		didMutate, containerPatch, err := s.mutateContainer(ctx, &c, i)
+		didMutate, containerPatch, err := s.mutateContainer(ctx, &pod.ObjectMeta, &c, i)
 		if err != nil {
 			glog.Error("Error occurred mutating container for secret injection: ", err)
 			return &admissionv1.AdmissionResponse{
@@ -284,7 +313,17 @@ func (s *SecretInjector) mutate(ar *admissionv1.AdmissionReview) *admissionv1.Ad
 		}
 	}
 
-	glog.Infof("AdmissionResponse: patch=%v\n", string(patchBytes))
+	logStr := string(patchBytes)
+
+	// For OP_CONNECT_TOKEN
+	reConnectToken := regexp.MustCompile(`OP_CONNECT_TOKEN=([^ ]+)`) 
+	maskedConnectStr := reConnectToken.ReplaceAllString(logStr, "OP_CONNECT_TOKEN=***MASKED***")
+
+	// For OP_SERVICE_ACCOUNT_TOKEN
+	reServiceAccountToken := regexp.MustCompile(`OP_SERVICE_ACCOUNT_TOKEN=([^ ]+)`)
+	maskedServiceAccountStr := reServiceAccountToken.ReplaceAllString(maskedConnectStr, "OP_SERVICE_ACCOUNT_TOKEN=***MASKED***")
+
+	glog.Infof("AdmissionResponse: patch=%v\n", maskedServiceAccountStr)
 	return &admissionv1.AdmissionResponse{
 		Allowed: true,
 		Patch:   patchBytes,
@@ -370,14 +409,40 @@ func passUserAgentInformationToCLI(container *corev1.Container, containerIndex i
 }
 
 // mutates the container to allow for secrets to be injected into the container via the op cli
-func (s *SecretInjector) mutateContainer(cxt context.Context, container *corev1.Container, containerIndex int) (bool, []patchOperation, error) {
+func (s *SecretInjector) mutateContainer(cxt context.Context, podMeta *metav1.ObjectMeta, container *corev1.Container, containerIndex int) (bool, []patchOperation, error) {
+	// Fetch token name from annotations
+    connectTokenName, serviceTokenName := fetchTokenName(podMeta)
+    secretEnvSetting := ""
+	tokenValue := ""
+
+    if connectTokenName != "" {
+		tokenValue = os.Getenv(connectTokenName)
+		if tokenValue == "" {
+			return false, nil, fmt.Errorf("failed to fetch connect token named '%s' from environment", connectTokenName)
+		}
+		
+		// Prepare the string for temporary environment setting for connect token
+		secretEnvSetting = fmt.Sprintf("OP_CONNECT_TOKEN=%s", tokenValue)
+	} else if serviceTokenName != "" {
+		tokenValue = os.Getenv(serviceTokenName)
+		if tokenValue == "" {
+			return false, nil, fmt.Errorf("failed to fetch connect token named '%s' from environment", serviceTokenName)
+		}
+	
+		// Prepare the string for temporary environment setting for service account token
+		secretEnvSetting = fmt.Sprintf("OP_SERVICE_ACCOUNT_TOKEN=%s", tokenValue)
+	}
 	//  prepending op run command to the container command so that secrets are injected before the main process is started
 	if len(container.Command) == 0 {
 		return false, nil, fmt.Errorf("not attaching OP to the container %s: the podspec does not define a command", container.Name)
 	}
-
-	// Prepend the command with op run --
-	container.Command = append([]string{binVolumeMountPath + "op", "run", "--"}, container.Command...)
+	// If the secret was retrieved, prepend the command with the temporary environment setting
+    if secretEnvSetting != "" {
+        container.Command = append([]string{"/bin/sh", "-c", secretEnvSetting + " " + binVolumeMountPath + "op run -- " + strings.Join(container.Command, " ")})
+    } else {
+        // Prepend the command with op run --
+        container.Command = append([]string{binVolumeMountPath + "op", "run", "--"}, container.Command...)
+    }
 
 	var patch []patchOperation
 
@@ -396,9 +461,10 @@ func (s *SecretInjector) mutateContainer(cxt context.Context, container *corev1.
 		Path:  path,
 		Value: container.Command,
 	})
-
-	checkOPCLIEnvSetup(container)
-
+    if secretEnvSetting == "" {
+		checkOPCLIEnvSetup(container)
+	}
+	
 	//creating patch for passing User-Agent information to the CLI.
 	patch = append(patch, passUserAgentInformationToCLI(container, containerIndex)...)
 	return true, patch, nil

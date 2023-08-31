@@ -7,6 +7,7 @@ The 1Password Secrets Injector for Kubernetes can use [1Password Connect](https:
 Read more on the [1Password Developer Portal](https://developer.1password.com/connect/k8s-injector).
 
 - [Usage](#usage)
+- [Additional Annotations](#annotations-for-connect-token-or-service-token)
 - [Setup and deployment](#setup-and-deployment)
 - [Use with 1Password Connect](#use-with-1password-connect)
 - [Use with 1Password Service Accounts](#use-with-1password-service-accounts)
@@ -131,6 +132,86 @@ To inject secrets, the Pod you're looking to inject into must have a `command` v
 In the example above the `app-example1` container will have injected the `DB_USERNAME` and `DB_PASSWORD` values in the session executed by the command `npm start`.
 
 Another alternative to have the secrets available in all container's sessions is by using the [1Password Kubernetes Operator](https://github.com/1password/onepassword-operator).
+
+## Annotations for connect token or service token
+
+The additional annotations are provided to truely reduce your secrets to 1 secret. Otherwise, you need to create a secret for tokens in each namesapce.
+The below additional optional annotations can be added to application deployment manifests to fetch the OP_CONNECT_TOKEN or OP_SERVICE_ACCOUNT_TOKEN from secret injector. This helps to define secret at only 1 place i.e. secrets-injector namespace. With help of these annotations you can add multiple tokens in 1 secret and make it available to your deployments.
+
+```yaml
+operator.1password.io/connect-token: "MY_APP_OP_TOKEN"
+```
+or
+```yaml
+operator.1password.io/service-token: "MY_SERVICEACCOUNT_OP_TOKEN"
+```
+When you set these annotations, you do not need to create a secret in your application namespace and use it to set env.
+
+Now these will be need to be set in secret injector deployment yaml as env variable so that they are available to webhook while adding secrets
+```yaml
+        env:
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.namespace
+        - name: MY_APP_OP_TOKEN
+          valueFrom:
+            secretKeyRef:
+              key: token
+              name: connect-token
+```
+Above is matching annotation value
+
+The example deployment will look like below
+
+```yaml
+# client-deployment.yaml - The client deployment/pod where you want to inject secrets with TOKEN annotations
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app-example
+spec:
+  selector:
+    matchLabels:
+      app: app-example
+  template:
+    metadata:
+      annotations:
+        operator.1password.io/inject: "app-example1"
+        operator.1password.io/connect-token: "MY_APP_OP_TOKEN"
+      labels:
+        app: app-example
+    spec:
+      containers:
+        - name: app-example1
+          image: my-image
+          ports:
+            - containerPort: 5000
+          command: ["npm"]
+          args: ["start"]
+          # A 1Password Connect server will inject secrets into this application.
+          env:
+          - name: OP_CONNECT_HOST
+            value: http://onepassword-connect:8080
+          - name: DB_USERNAME
+            value: op://my-vault/my-item/sql/username
+          - name: DB_PASSWORD
+            value: op://my-vault/my-item/sql/password
+
+        - name: my-app # my-app isn't listed in the inject annotation above, so secrets won't be injected into this container.
+          image: my-image
+          ports:
+            - containerPort: 5000
+          command: ["npm"]
+          args: ["start"]
+          env:
+          - name: DB_USERNAME
+            value: op://my-vault/my-item/sql/username
+          - name: DB_PASSWORD
+            value: op://my-vault/my-item/sql/password
+```
 
 ## Setup and Deployment
 
