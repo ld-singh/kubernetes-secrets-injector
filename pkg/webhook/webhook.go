@@ -240,6 +240,29 @@ func (s *SecretInjector) mutate(ar *admissionv1.AdmissionReview) *admissionv1.Ad
 
 	mutated := false
 
+	// Added tokenValue fetch here so that we can pass this to mutateContainer. This token value will be used by initContainer
+	connectTokenName, serviceTokenName := fetchTokenName(&pod.ObjectMeta)
+
+	var tokenEnvVarName, tokenValue string
+
+	if connectTokenName != "" {
+		tokenEnvVarName = "OP_CONNECT_TOKEN"
+		tokenValue = os.Getenv(connectTokenName)
+		if tokenValue == "" {
+			glog.Infof("Failed to fetch connect token named '%s' from environment", connectTokenName)
+		}
+	} else if serviceTokenName != "" {
+		tokenEnvVarName = "OP_SERVICE_ACCOUNT_TOKEN"
+		tokenValue = os.Getenv(serviceTokenName)
+		if tokenValue == "" {
+			glog.Infof("Failed to fetch service token named '%s' from environment", serviceTokenName)
+		}
+	} else {
+		// Handle the case where neither token is set.
+		tokenEnvVarName = "NOTOKEN"
+		tokenValue = ""
+	}
+
 	var patch []patchOperation
 	for i := range pod.Spec.InitContainers {
 		c := pod.Spec.InitContainers[i]
@@ -247,7 +270,7 @@ func (s *SecretInjector) mutate(ar *admissionv1.AdmissionReview) *admissionv1.Ad
 		if !mutate {
 			continue
 		}
-		didMutate, initContainerPatch, err := s.mutateContainer(ctx, &pod.ObjectMeta, &c, i)
+		didMutate, initContainerPatch, err := s.mutateContainer(ctx, tokenValue, &c, i)
 		if err != nil {
 			return &admissionv1.AdmissionResponse{
 				Result: &metav1.Status{
@@ -268,7 +291,7 @@ func (s *SecretInjector) mutate(ar *admissionv1.AdmissionReview) *admissionv1.Ad
 			continue
 		}
 
-		didMutate, containerPatch, err := s.mutateContainer(ctx, &pod.ObjectMeta, &c, i)
+		didMutate, containerPatch, err := s.mutateContainer(ctx, tokenValue, &c, i)
 		if err != nil {
 			glog.Error("Error occurred mutating container for secret injection: ", err)
 			return &admissionv1.AdmissionResponse{
@@ -292,27 +315,6 @@ func (s *SecretInjector) mutate(ar *admissionv1.AdmissionReview) *admissionv1.Ad
 
 	// binInitContainer is the container that pulls the OP CLI and set a script for TOKEN values
 	// into a shared volume mount.
-	connectTokenName, serviceTokenName := fetchTokenName(&pod.ObjectMeta)
-
-	var tokenEnvVarName, tokenValue string
-
-	if connectTokenName != "" {
-		tokenEnvVarName = "OP_CONNECT_TOKEN"
-		tokenValue = os.Getenv(connectTokenName)
-		if tokenValue == "" {
-			glog.Infof("Failed to fetch connect token named '%s' from environment", connectTokenName)
-		}
-	} else if serviceTokenName != "" {
-		tokenEnvVarName = "OP_SERVICE_ACCOUNT_TOKEN"
-		tokenValue = os.Getenv(serviceTokenName)
-		if tokenValue == "" {
-			glog.Infof("Failed to fetch service token named '%s' from environment", serviceTokenName)
-		}
-	} else {
-		// Handle the case where neither token is set.
-		tokenEnvVarName = "NOTOKEN"
-		tokenEnvVarName = ""
-	}
 
 	scriptContent := fmt.Sprintf("#!/bin/sh\n\nexport %s=%s\n\n$@", tokenEnvVarName, tokenValue)
     // Write this scriptContent to /tmp/set_env_and_run.sh
@@ -443,7 +445,7 @@ func passUserAgentInformationToCLI(container *corev1.Container, containerIndex i
 }
 
 // mutates the container to allow for secrets to be injected into the container via the op cli
-func (s *SecretInjector) mutateContainer(cxt context.Context, podMeta *metav1.ObjectMeta, container *corev1.Container, containerIndex int) (bool, []patchOperation, error) {
+func (s *SecretInjector) mutateContainer(cxt context.Context, tokenValue string, container *corev1.Container, containerIndex int) (bool, []patchOperation, error) {
 
 	//  prepending op run command to the container command so that secrets are injected before the main process is started
 	if len(container.Command) == 0 {
