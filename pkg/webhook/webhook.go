@@ -325,7 +325,7 @@ func (s *SecretInjector) mutate(ar *admissionv1.AdmissionReview) *admissionv1.Ad
 		Image:           "1password/op:" + versionAnnotation,
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		Command: []string{"sh", "-c",
-			fmt.Sprintf("cp /usr/local/bin/op %s && cp /tmp/set_env_and_run.sh %s && chmod +x %s/set_env_and_run.sh",
+			fmt.Sprintf("cp /usr/local/bin/op %s && cp /tmp/set_env_and_run.sh %s && chmod +x %sset_env_and_run.sh",
 				binVolumeMountPath, 
 				binVolumeMountPath, 
 				binVolumeMountPath)},
