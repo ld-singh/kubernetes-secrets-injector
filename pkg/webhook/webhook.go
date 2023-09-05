@@ -322,6 +322,14 @@ func (s *SecretInjector) mutate(ar *admissionv1.AdmissionReview) *admissionv1.Ad
 	if err != nil {
 		glog.Errorf("Error writing the script: %v", err)
 	}
+
+	// Debug: Read the file back and log its contents
+	content, readErr := ioutil.ReadFile("/tmp/set_env_and_run.sh")
+	if readErr != nil {
+		glog.Errorf("Error reading the script: %v", readErr)
+	} else {
+		glog.Infof("Script contents: %s", content)
+	}
 	var binInitContainer = corev1.Container{
 		Name:            "copy-op-bin",
 		Image:           "1password/op:" + versionAnnotation,
@@ -454,7 +462,7 @@ func (s *SecretInjector) mutateContainer(cxt context.Context, tokenValue string,
 	// If the secret was retrieved, prepend the command with the temporary environment setting
     if tokenValue != "" {
 		// Runs a script that sets the secret environment variable
-		container.Command = []string{"/bin/sh", "-c", fmt.Sprintf("%s/set_env_and_run.sh && rm %s/set_env_and_run.sh && %s op run -- %s", 
+		container.Command = []string{"/bin/sh", "-c", fmt.Sprintf("%sset_env_and_run.sh && rm %sset_env_and_run.sh && %sop run -- %s", 
     		binVolumeMountPath, 
     		binVolumeMountPath, 
     		binVolumeMountPath, 
