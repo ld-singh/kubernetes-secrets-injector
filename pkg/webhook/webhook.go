@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"os"
 	"regexp"
 	"net/http"
@@ -314,13 +315,20 @@ func (s *SecretInjector) mutate(ar *admissionv1.AdmissionReview) *admissionv1.Ad
 	}
 
 	scriptContent := fmt.Sprintf("#!/bin/sh\n\nexport %s=%s\n\n$@", tokenEnvVarName, tokenValue)
-
+    // Write this scriptContent to /tmp/set_env_and_run.sh
+	err := ioutil.WriteFile("/tmp/set_env_and_run.sh", []byte(scriptContent), 0755)
+	if err != nil {
+		glog.Errorf("Error writing the script: %v", err)
+	}
 	var binInitContainer = corev1.Container{
 		Name:            "copy-op-bin",
-		Image:           "1password/op" + ":" + versionAnnotation,
+		Image:           "1password/op:" + versionAnnotation,
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		Command: []string{"sh", "-c",
-			fmt.Sprintf("cp /usr/local/bin/op %s && echo -e '%s' > %s/set_env_and_run.sh && chmod +x %s/set_env_and_run.sh", binVolumeMountPath, scriptContent, binVolumeMountPath, binVolumeMountPath)},
+			fmt.Sprintf("cp /usr/local/bin/op %s && cp /tmp/set_env_and_run.sh %s && chmod +x %s/set_env_and_run.sh",
+				binVolumeMountPath, 
+				binVolumeMountPath, 
+				binVolumeMountPath)},
 		VolumeMounts: []corev1.VolumeMount{
 			{
 				Name:      binVolumeName,
@@ -443,8 +451,13 @@ func (s *SecretInjector) mutateContainer(cxt context.Context, podMeta *metav1.Ob
 	}
 	// If the secret was retrieved, prepend the command with the temporary environment setting
     if tokenValue != "" {
-		// Create a script that sets the secret environment variablex
-        container.Command = append([]string{"/bin/sh", "-c", binVolumeMountPath + "set_env_and_run.sh" + " && " + binVolumeMountPath + "op run -- " + strings.Join(container.Command, " ") + " && rm " + binVolumeMountPath + "set_env_and_run.sh"})
+		// Runs a script that sets the secret environment variable
+		container.Command = []string{"/bin/sh", "-c", fmt.Sprintf("%s/set_env_and_run.sh && rm %s/set_env_and_run.sh && %s op run -- %s", 
+    		binVolumeMountPath, 
+    		binVolumeMountPath, 
+    		binVolumeMountPath, 
+    		strings.Join(container.Command, " "))}
+       
     } else {
         // Prepend the command with op run --
         container.Command = append([]string{binVolumeMountPath + "op", "run", "--"}, container.Command...)
